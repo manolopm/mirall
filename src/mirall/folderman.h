@@ -102,7 +102,10 @@ public slots:
 
     void slotReparseConfiguration();
 
-    void terminateSyncProcess( const QString& );
+    void terminateSyncProcess( const QString& alias = QString::null );
+
+    /* delete all folder objects */
+    int unloadAllFolders();
 
     // if enabled is set to false, no new folders will start to sync.
     // the current one will finish.

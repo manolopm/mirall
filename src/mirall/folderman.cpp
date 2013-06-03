@@ -79,20 +79,28 @@ void FolderMan::slotReparseConfiguration()
     setupKnownFolders();
 }
 
+int FolderMan::unloadAllFolders()
+{
+    // first terminate sync jobs.
+    terminateCurrentSync();
+
+    int cnt = 0;
+
+    // clear the list of existing folders.
+    Folder::MapIterator i(_folderMap);
+    while (i.hasNext()) {
+        i.next();
+        delete _folderMap.take( i.key() );
+        cnt++;
+    }
+    return cnt;
+}
 
 int FolderMan::setupKnownFolders()
 {
   qDebug() << "* Setup folders from " << _folderConfigPath;
 
-  // first terminate sync jobs.
-  terminateCurrentSync();
-
-  // clear the list of existing folders.
-  Folder::MapIterator i(_folderMap);
-  while (i.hasNext()) {
-      i.next();
-      delete _folderMap.take( i.key() );
-  }
+  unloadAllFolders();
 
   QDir dir( _folderConfigPath );
   dir.setFilter(QDir::Files);
@@ -275,12 +283,18 @@ void FolderMan::slotEnableFolder( const QString& alias, bool enable )
 // csync still remains in a stable state, regardless of that.
 void FolderMan::terminateSyncProcess( const QString& alias )
 {
-    Folder *f = _folderMap[alias];
-    if( f ) {
-        f->slotTerminateSync();
+    QString folderAlias = alias;
+    if( alias.isEmpty() ) {
+        folderAlias = _currentSyncFolder;
+    }
+    if( ! folderAlias.isEmpty() ) {
+        Folder *f = _folderMap[folderAlias];
+        if( f ) {
+            f->slotTerminateSync();
 
-        if(_currentSyncFolder == alias )
-            _currentSyncFolder = QString::null;
+            if(_currentSyncFolder == folderAlias )
+                _currentSyncFolder = QString::null;
+        }
     }
 }
 
@@ -464,7 +478,7 @@ QString FolderMan::getBackupName( const QString& fullPathName ) const
      int cnt = 1;
      do {
          if( fi.exists() ) {
-             newName += fullPathName + QString( ".oC_bak_%1").arg(cnt++);
+             newName = fullPathName + QString( ".oC_bak_%1").arg(cnt++);
              fi.setFile(newName);
          }
      } while( fi.exists() );
@@ -479,6 +493,13 @@ bool FolderMan::startFromScratch( const QString& localFolder )
     QFileInfo fi( localFolder );
     if( fi.exists() && fi.isDir() ) {
         QDir file = fi.dir();
+
+        // check if there are files in the directory.
+        if( file.count() == 0 ) {
+            // directory is existing, but its empty. Use it.
+            qDebug() << "startFromScratch: Directory is empty!";
+            return true;
+        }
         QString newName = getBackupName( fi.absoluteFilePath() );
 
         if( file.rename( fi.absoluteFilePath(), newName )) {
