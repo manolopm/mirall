@@ -33,6 +33,19 @@ class FolderMan : public QObject
 {
     Q_OBJECT
 public:
+    /** Helper class to ensure sync is always switched back on */
+    class SyncDisabler
+    {
+    public:
+        SyncDisabler(Mirall::FolderMan *man) : _man(man)
+        {
+            _man->setSyncEnabled(false);
+        }
+        ~SyncDisabler() { _man->setSyncEnabled(true); }
+    private:
+        FolderMan *_man;
+    };
+
     explicit FolderMan(QObject *parent = 0);
     ~FolderMan();
 
@@ -75,6 +88,13 @@ public:
      * Removes csync journals from all folders.
      */
     void wipeAllJournals();
+
+    /**
+     * Ensures that a given directory does not contain a .csync_journal.
+     *
+     * @returns false if the journal could not be removed, false otherwise.
+     */
+    static bool ensureJournalGone(const QString &path);
 
     /**
      * Creates a new and empty local directory.

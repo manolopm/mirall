@@ -27,6 +27,7 @@
 #endif
 
 #include <QDesktopServices>
+#include <QMessageBox>
 #include <QtCore>
 
 namespace Mirall {
@@ -123,6 +124,25 @@ void FolderMan::wipeAllJournals()
     foreach( Folder *f, _folderMap.values() ) {
         f->wipe();
     }
+}
+
+bool FolderMan::ensureJournalGone(const QString &localPath)
+{
+
+    // remove old .csync_journal file
+    QString stateDbFile = localPath+QLatin1String("/.csync_journal.db");
+    while (QFile::exists(stateDbFile) && !QFile::remove(stateDbFile)) {
+        int ret = QMessageBox::warning(0, tr("Could not reset folder state"),
+                                       tr("An old sync journal '%1' was found, "
+                                          "but could not be removed. Please make sure "
+                                          "that no application is currently using it.")
+                                       .arg(QDir::fromNativeSeparators(QDir::cleanPath(stateDbFile))),
+                                       QMessageBox::Retry|QMessageBox::Abort);
+        if (ret == QMessageBox::Abort) {
+            return false;
+        }
+    }
+    return true;
 }
 
 void FolderMan::terminateCurrentSync()
@@ -243,7 +263,7 @@ Folder* FolderMan::setupFolderFromConfigFile(const QString &file) {
             folder->setConfigFile(file);
         } else {
             qWarning() << "unknown backend" << backend;
-            return NULL;
+            return 0;
         }
     }
 

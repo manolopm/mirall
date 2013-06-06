@@ -34,6 +34,10 @@
 
 #include "mirall/inotify.h"
 
+#if defined(Q_OS_WIN)
+#include <windows.h>
+#endif
+
 #include <QtCore>
 #include <QtGui>
 #include <QHash>
@@ -54,6 +58,19 @@ void mirallLogCatcher(QtMsgType type, const char *msg)
 }
 
 namespace {
+
+static const char optionsC[] =
+        "Options:\n"
+        "  -h --help            : show this help screen.\n"
+        "  --logwindow          : open a window to show log output.\n"
+        "  --logfile <filename> : write log output to file <filename>.\n"
+        "  --logdir <name>      : write each sync log output in a new file\n"
+        "                         in directory <name>.\n"
+        "  --logflush           : flush the log file after every write.\n"
+        "  --monoicons          : Use black/white pictograms for systray.\n"
+        "  --confdir <dirname>  : Use the given configuration directory.\n"
+        ;
+
 QString applicationTrPath()
 {
 #ifdef Q_OS_LINUX
@@ -657,44 +674,35 @@ void Application::slotTrayClicked( QSystemTrayIcon::ActivationReason reason )
 
 void Application::slotAddFolder()
 {
-  _folderMan->setSyncEnabled(false); // do not start more syncs.
+    // disables sync queuing while in scope
+    FolderMan::SyncDisabler disableSync(_folderMan);
 
-  Folder::Map folderMap = _folderMan->map();
+    Folder::Map folderMap = _folderMan->map();
+    _folderWizard->setFolderMap( &folderMap );
+    _folderWizard->restart();
 
-  _folderWizard->setFolderMap( &folderMap );
+    if (_folderWizard->exec() == QDialog::Accepted) {
+        qDebug() << "* Folder wizard completed";
 
-  _folderWizard->restart();
+        QString alias        = _folderWizard->field(QLatin1String("alias")).toString();
+        QString sourceFolder = _folderWizard->field(QLatin1String("sourceFolder")).toString();
+        QString targetPath   = _folderWizard->field(QLatin1String("OCFolderLineEdit")).toString();
+        QString backend      = QLatin1String("owncloud");
 
-  if (_folderWizard->exec() == QDialog::Accepted) {
-    qDebug() << "* Folder wizard completed";
-
-    bool goodData = true;
-
-    QString alias        = _folderWizard->field(QLatin1String("alias")).toString();
-    QString sourceFolder = _folderWizard->field(QLatin1String("sourceFolder")).toString();
-    QString backend      = QLatin1String("owncloud");
-    QString targetPath;
-    bool onlyThisLAN = false;
-
-    targetPath = _folderWizard->field(QLatin1String("OCFolderLineEdit")).toString();
-
-    _folderMan->setSyncEnabled(true); // do start sync again.
-
-    if( goodData ) {
-        _folderMan->addFolderDefinition( backend, alias, sourceFolder, targetPath, onlyThisLAN );
+        if (!FolderMan::ensureJournalGone( sourceFolder ))
+            return;
+        _folderMan->addFolderDefinition( backend, alias, sourceFolder, targetPath, false );
         Folder *f = _folderMan->setupFolderFromConfigFile( alias );
         if( f ) {
             _statusDialog->slotAddFolder( f );
             _statusDialog->buttonsSetEnabled();
             setupContextMenu();
         }
-    }
 
-  } else {
-    qDebug() << "* Folder wizard cancelled";
-  }
-  _folderMan->setSyncEnabled(true);
-  _folderMan->slotScheduleAllFolders();
+    } else {
+        qDebug() << "* Folder wizard cancelled";
+    }
+    _folderMan->slotScheduleAllFolders();
 }
 
 void Application::slotOpenStatus()
@@ -1000,29 +1008,78 @@ void Application::computeOverallSyncStatus()
     }
 }
 
+// Helpers for displaying messages. Note that there is no console on Windows.
+#ifdef Q_OS_WIN
+// Format as <pre> HTML
+static inline void toHtml(QString &t)
+{
+    t.replace(QLatin1Char('&'), QLatin1String("&amp;"));
+    t.replace(QLatin1Char('<'), QLatin1String("&lt;"));
+    t.replace(QLatin1Char('>'), QLatin1String("&gt;"));
+    t.insert(0, QLatin1String("<html><pre>"));
+    t.append(QLatin1String("</pre></html>"));
+}
+
+static void displayHelpText(QString t) // No console on Windows.
+{
+    toHtml(t);
+    QMessageBox::information(0, Theme::instance()->appNameGUI(), t);
+}
+
+#else
+
+static void displayHelpText(const QString &t)
+{
+    std::cout << qPrintable(t);
+}
+#endif
+
 void Application::showHelp()
 {
-setHelp();
-    std::cout << _theme->appName().toLatin1().constData() << " version " <<
-                 _theme->version().toLatin1().constData() << std::endl << std::endl;
-    std::cout << "File synchronisation desktop utility." << std::endl << std::endl;
-    std::cout << "Options:" << std::endl;
-    std::cout << "  -h --help            : show this help screen." << std::endl;
-    std::cout << "  --logwindow          : open a window to show log output." << std::endl;
-    std::cout << "  --logfile <filename> : write log output to file <filename>." << std::endl;
-    std::cout << "  --logdir <name>      : write each sync log output in a different file in directory <name>." << std::endl;
-    std::cout << "  --logflush           : flush the log file after every write." << std::endl;
-    std::cout << "  --monoicons          : Use black/white pictograms for systray." << std::endl;
-    std::cout << "  --confdir <dirname>  : Use the given configuration directory." << std::endl;
-    std::cout << std::endl;
+    setHelp();
+    QString helpText;
+    QTextStream stream(&helpText);
+    stream << _theme->appName().toLatin1().constData()
+           << QLatin1String(" version ")
+           << _theme->version().toLatin1().constData() << endl;
+
+    stream << QLatin1String("File synchronisation desktop utility.") << endl << endl
+           << QLatin1String(optionsC);
+
     if (_theme->appName() == QLatin1String("ownCloud"))
-        std::cout << "For more information, see http://www.owncloud.org" << std::endl;
+        stream << endl << "For more information, see http://www.owncloud.org" << endl;
+
+    displayHelpText(helpText);
 }
 
 void Application::setHelp()
 {
     _helpOnly = true;
 }
+
+#if defined(Q_OS_WIN)
+bool Application::winEventFilter(MSG *pMsg, long *result)
+{
+    if (pMsg->message == WM_POWERBROADCAST) {
+        switch(pMsg->wParam) {
+        case PBT_APMPOWERSTATUSCHANGE:
+            qDebug() << "WM_POWERBROADCAST: Power state changed";
+            break;
+        case PBT_APMSUSPEND:
+            qDebug() << "WM_POWERBROADCAST: Entering low power state";
+            break;
+        case PBT_APMRESUMEAUTOMATIC:
+            qDebug() << "WM_POWERBROADCAST: Resuming from low power state";
+            break;
+        default:
+            break;
+        }
+        return true;
+    }
+
+    SharedTools::QtSingleApplication::winEventFilter(pMsg, result);
+}
+#endif
 
 QString substLang(const QString &lang)
 {
