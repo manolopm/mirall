@@ -54,7 +54,8 @@ namespace Mirall {
 void mirallLogCatcher(QtMsgType type, const char *msg)
 {
   Q_UNUSED(type)
-  Logger::instance()->mirallLog( QString::fromUtf8(msg) );
+  // qDebug() exports to local8Bit, which is not always UTF-8
+  Logger::instance()->mirallLog( QString::fromLocal8Bit(msg) );
 }
 
 namespace {
@@ -66,6 +67,8 @@ static const char optionsC[] =
         "  --logfile <filename> : write log output to file <filename>.\n"
         "  --logdir <name>      : write each sync log output in a new file\n"
         "                         in directory <name>.\n"
+        "  --logexpire <hours>  : removes logs older than <hours> hours.\n"
+        "                         (to be used with --logdir)\n"
         "  --logflush           : flush the log file after every write.\n"
         "  --monoicons          : Use black/white pictograms for systray.\n"
         "  --confdir <dirname>  : Use the given configuration directory.\n"
@@ -99,11 +102,13 @@ Application::Application(int &argc, char **argv) :
     _theme(Theme::instance()),
     _updateDetector(0),
     _logBrowser(0),
+    _logExpire(0),
     _showLogWindow(false),
     _logFlush(false),
     _helpOnly(false),
     _fileItemDialog(0),
-    _statusDialog(0)
+    _statusDialog(0),
+    _folderWizard(0)
 {
     setApplicationName( _theme->appNameGUI() );
     setWindowIcon( _theme->applicationIcon() );
@@ -129,12 +134,6 @@ Application::Application(int &argc, char **argv) :
             this, SLOT(slotFolderOpenAction(const QString &)));
 
     setQuitOnLastWindowClosed(false);
-
-    _folderWizard = new FolderWizard;
-
-    _owncloudSetupWizard = new OwncloudSetupWizard( _folderMan, _theme, this );
-    connect( _owncloudSetupWizard, SIGNAL(ownCloudWizardDone(int)),
-             this, SLOT(slotownCloudWizardDone(int)));
 
     _statusDialog = new StatusDialog( _theme );
     connect( _statusDialog, SIGNAL(addASync()), this, SLOT(slotAddFolder()) );
@@ -207,7 +206,7 @@ void Application::slotStartFolderSetup( int result )
 
             ownCloudInfo::instance()->checkInstallation();
         } else {
-            _owncloudSetupWizard->startWizard();
+            slotConfigure();
         }
     } else {
         qDebug() << "Setup Wizard was canceled. No reparsing of config.";
@@ -374,8 +373,6 @@ void Application::slotAuthCheck( const QString& ,QNetworkReply *reply )
         _actionAddFolder->setEnabled( true );
         _actionOpenStatus->setEnabled( true );
         setupContextMenu();
-    } else {
-        slotFetchCredentials();
     }
 }
 
@@ -424,6 +421,7 @@ void Application::slotownCloudWizardDone( int res )
     }
     _folderMan->setSyncEnabled( true );
     slotStartFolderSetup( res );
+    _owncloudSetupWizard.reset(0);
 }
 
 void Application::setupActions()
@@ -574,9 +572,16 @@ void Application::enterNextLogFile()
                                     QDir::Files);
         QRegExp rx("owncloud.log.(\\d+)");
         uint maxNumber = 0;
+        QDateTime now = QDateTime::currentDateTime();
         foreach(const QString &s, files) {
             if (rx.exactMatch(s)) {
                 maxNumber = qMax(maxNumber, rx.cap(1).toUInt());
+                if (_logExpire > 0) {
+                    QFileInfo fileInfo = dir.absoluteFilePath(s);
+                    if (fileInfo.lastModified().addSecs(60*60 * _logExpire) < now) {
+                        dir.remove(s);
+                    }
+                }
             }
         }
 
@@ -666,7 +671,7 @@ void Application::slotTrayClicked( QSystemTrayIcon::ActivationReason reason )
         slotFetchCredentials();
     }
 #if defined Q_WS_WIN || defined Q_WS_X11
-    if( reason == QSystemTrayIcon::Trigger && _actionOpenStatus->isEnabled() ) {
+    if( reason == QSystemTrayIcon::Trigger ) {
         slotOpenStatus();
     }
 #endif
@@ -674,12 +679,34 @@ void Application::slotTrayClicked( QSystemTrayIcon::ActivationReason reason )
 
 void Application::slotAddFolder()
 {
+    /** Helper class to ensure sync is always switched back on */
+    class SyncDisabler
+    {
+    public:
+        SyncDisabler(Application *app) : _app(app)
+        {
+            _app->_folderMan->setSyncEnabled(false);
+        }
+        ~SyncDisabler() {
+            _app->_folderMan->setSyncEnabled(true);
+            _app->computeOverallSyncStatus();
+            _app->_folderMan->slotScheduleAllFolders();
+        }
+    private:
+        Application *_app;
+    };
+
+    if (_folderWizard) {
+        raiseDialog(_folderWizard);
+        return;
+    }
+
     // disables sync queuing while in scope
-    FolderMan::SyncDisabler disableSync(_folderMan);
+    SyncDisabler disableSync(this);
 
     Folder::Map folderMap = _folderMan->map();
+    _folderWizard = new FolderWizard;
     _folderWizard->setFolderMap( &folderMap );
-    _folderWizard->restart();
 
     if (_folderWizard->exec() == QDialog::Accepted) {
         qDebug() << "* Folder wizard completed";
@@ -702,7 +729,8 @@ void Application::slotAddFolder()
     } else {
         qDebug() << "* Folder wizard cancelled";
     }
-    _folderMan->slotScheduleAllFolders();
+    _folderWizard->deleteLater();
+    _folderWizard = 0;
 }
 
 void Application::slotOpenStatus()
@@ -712,7 +740,7 @@ void Application::slotOpenStatus()
   QWidget *raiseWidget = 0;
 
   // check if there is a mirall.cfg already.
-  if( _owncloudSetupWizard->wizard()->isVisible() ) {
+  if( _owncloudSetupWizard && _owncloudSetupWizard->wizard()->isVisible() ) {
     raiseWidget = _owncloudSetupWizard->wizard();
   }
 
@@ -722,8 +750,7 @@ void Application::slotOpenStatus()
 
     if( !cfgFile.exists() ) {
       qDebug() << "No configured folders yet, start the Owncloud integration dialog.";
-      _folderMan->setSyncEnabled(false);
-      _owncloudSetupWizard->startWizard();
+      slotConfigure();
     } else {
       qDebug() << "#============# Status dialog starting #=============#";
       raiseWidget = _statusDialog;
@@ -770,16 +797,14 @@ void Application::slotAbout()
 void Application::slotRemoveFolder( const QString& alias )
 {
     int ret = QMessageBox::question( 0, tr("Confirm Folder Remove"),
-                                     tr("Do you really want to remove upload folder <i>%1</i>?").arg(alias),
+                                     tr("<p>Do you really want to stop syncing the upload folder <i>%1</i>?</p>"
+                                        "<p><b>Note:</b> This will not remove the files from your client.</p>").arg(alias),
                                      QMessageBox::Yes|QMessageBox::No );
 
     if( ret == QMessageBox::No ) {
         return;
     }
     Folder *f = _folderMan->folder(alias);
-    if( f && _overallStatusStrings.contains( f->alias() )) {
-        _overallStatusStrings.remove( f->alias() );
-    }
 
     _folderMan->slotRemoveFolder( alias );
     _statusDialog->slotRemoveSelectedFolder( );
@@ -833,11 +858,17 @@ void Application::slotEnableFolder(const QString& alias, const bool enable)
 
 void Application::slotConfigure()
 {
-    _folderMan->setSyncEnabled(false); // do not start more syncs.
-    if (!_owncloudSetupWizard->wizard()->isVisible())
-        _owncloudSetupWizard->startWizard();
-    else
+    if (_owncloudSetupWizard && !_owncloudSetupWizard->wizard()->isVisible()) {
         raiseDialog(_owncloudSetupWizard->wizard());
+        return;
+    }
+
+    _owncloudSetupWizard.reset(new OwncloudSetupWizard( _folderMan, _theme, this ));;
+    connect( _owncloudSetupWizard.data(), SIGNAL(ownCloudWizardDone(int)),
+             this, SLOT(slotownCloudWizardDone(int)));
+
+    _folderMan->setSyncEnabled(false); // do not start more syncs.
+    _owncloudSetupWizard->startWizard();
 }
 
 void Application::slotConfigureProxy()
@@ -906,6 +937,12 @@ void Application::parseOptions(const QStringList &options)
             } else {
                 setHelp();
             }
+        } else if (option == QLatin1String("--logexpire")) {
+            if (it.hasNext() && !it.peekNext().startsWith(QLatin1String("--"))) {
+                _logExpire = it.next().toInt();
+            } else {
+                setHelp();
+            }
         } else if (option == QLatin1String("--logflush")) {
             _logFlush = true;
         } else if (option == QLatin1String("--monoicons")) {
@@ -929,11 +966,12 @@ void Application::computeOverallSyncStatus()
 
     // display the info of the least successful sync (eg. not just display the result of the latest sync
     SyncResult overallResult(SyncResult::Undefined );
+    QMap<QString, QString> overallStatusStrings;
     QString trayMessage;
     Folder::Map map = _folderMan->map();
 
     foreach ( Folder *syncedFolder, map.values() ) {
-        QString folderMessage = _overallStatusStrings[syncedFolder->alias()];
+        QString folderMessage;
 
         SyncResult folderResult = syncedFolder->syncResult();
         SyncResult::Status syncStatus = folderResult.status();
@@ -963,9 +1001,9 @@ void Application::computeOverallSyncStatus()
             break;
         case SyncResult::Success:
             if( overallResult.status() == SyncResult::Undefined ) {
-                folderMessage = tr( "Last Sync was successful." );
                 overallResult.setStatus( SyncResult::Success );
             }
+            folderMessage = tr( "Last Sync was successful." );
             break;
         case SyncResult::Error:
             overallResult.setStatus( SyncResult::Error );
@@ -987,15 +1025,13 @@ void Application::computeOverallSyncStatus()
         }
 
         qDebug() << "Folder in overallStatus Message: " << syncedFolder << " with name " << syncedFolder->alias();
-        QString msg = QString::fromLatin1("Folder %1: %2").arg(syncedFolder->alias()).arg(folderMessage);
-        if( msg != _overallStatusStrings[syncedFolder->alias()] ) {
-            _overallStatusStrings[syncedFolder->alias()] = msg;
-        }
+        QString msg = tr("Folder %1: %2").arg(syncedFolder->alias(), folderMessage);
+        overallStatusStrings[syncedFolder->alias()] = msg;
     }
 
     // create the tray blob message, check if we have an defined state
     if( overallResult.status() != SyncResult::Undefined ) {
-        QStringList allStatusStrings = _overallStatusStrings.values();
+        QStringList allStatusStrings = overallStatusStrings.values();
         if( ! allStatusStrings.isEmpty() )
             trayMessage = allStatusStrings.join(QLatin1String("\n"));
         else
@@ -1077,7 +1113,7 @@ bool Application::winEventFilter(MSG *pMsg, long *result)
         return true;
     }
 
-    SharedTools::QtSingleApplication::winEventFilter(pMsg, result);
+    return SharedTools::QtSingleApplication::winEventFilter(pMsg, result);
 }
 #endif
 

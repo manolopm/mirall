@@ -130,16 +130,12 @@ void OwncloudSetupPage::setServerUrl( const QString& newUrl )
 void OwncloudSetupPage::setupCustomization()
 {
     // set defaults for the customize labels.
-
-    // _ui.topLabel->hide();
+    _ui.topLabel->hide();
     _ui.bottomLabel->hide();
 
     Theme *theme = Theme::instance();
     QVariant variant = theme->customMedia( Theme::oCSetupTop );
-    if( variant.isNull() ) {
-        _ui.topLabel->setOpenExternalLinks(true);
-        _ui.topLabel->setText("If you don't have an ownCloud server yet, see <a href=\"https://owncloud.com\">owncloud.com</a> for more info.");
-    } else {
+    if( !variant.isNull() ) {
         setupCustomMedia( variant, _ui.topLabel );
     }
 
@@ -195,6 +191,9 @@ void OwncloudSetupPage::initializePage()
     _connected = false;
     _checking  = false;
     _multipleFoldersExist = false;
+
+    // call to init label
+    slotHandleUserInput();
 
     if( _configExists ) {
         _ui.lePassword->setFocus();
@@ -404,8 +403,11 @@ void OwncloudWizard::setMultipleFoldersExist(bool exist)
 void OwncloudSetupPage::setConfigExists(  bool config )
 {
     _configExists = config;
-    setSubTitle( tr("<font color=\"%1\">Change your user credentials</font>")
-                 .arg(Theme::instance()->wizardHeaderTitleColor().name()));
+
+    if (config == true) {
+        setSubTitle( tr("<font color=\"%1\">Change your user credentials</font>")
+                     .arg(Theme::instance()->wizardHeaderTitleColor().name()));
+    }
 }
 
 // ======================================================================

@@ -124,7 +124,7 @@ private:
 #endif
 
     FolderWizard  *_folderWizard;
-    OwncloudSetupWizard *_owncloudSetupWizard;
+    QScopedPointer<OwncloudSetupWizard> _owncloudSetupWizard;
     SslErrorDialog *_sslErrorDialog;
 
     // tray's menu
@@ -136,10 +136,10 @@ private:
     Theme *_theme;
     QSignalMapper *_folderOpenActionMapper;
     UpdateDetector *_updateDetector;
-    QMap<QString, QString> _overallStatusStrings;
     LogBrowser *_logBrowser;
     QString _logFile;
     QString _logDirectory;
+    int _logExpire;
     bool _showLogWindow;
     bool _logFlush;
     bool _helpOnly;

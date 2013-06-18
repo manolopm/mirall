@@ -123,7 +123,7 @@ void CredentialStore::fetchCredentials()
         _inputDialog->setTextEchoMode( QLineEdit::Password );
 
         connect(_inputDialog, SIGNAL(finished(int)), SLOT(slotUserDialogDone(int)));
-        _inputDialog->exec();
+        _inputDialog->open();
         break;
     }
     case CredentialStore::Settings: {
@@ -360,9 +360,9 @@ void CredentialStore::slotKeyChainWriteFinished( QKeychain::Job *job )
             qDebug() << "Error with keychain: " << pwdJob->errorString();
             if( err == NoBackendAvailable || err == NotImplemented ||
                     pwdJob->errorString().contains(QLatin1String("Could not open wallet"))) {
+                _state = NoKeychainBackend;
                 _type = Settings;
                 saveCredentials();
-                _state = NoKeychainBackend;
             } else {
                 _state = Error;
             }
