@@ -58,6 +58,8 @@ CSyncThread::~CSyncThread()
 
 }
 
+//Convert an error code from csync to a user readable string.
+// Keep that function thread safe as it can be called from the sync thread or the main thread
 QString CSyncThread::csyncErrorToString( CSYNC_ERROR_CODE err, const char *errString )
 {
     QString errStr;
@@ -106,8 +108,6 @@ QString CSyncThread::csyncErrorToString( CSYNC_ERROR_CODE err, const char *errSt
         break;
     case CSYNC_ERR_ACCESS_FAILED:
         errStr = tr("<p>The target directory does not exist.</p><p>Please check the sync setup.</p>");
-        // this is critical. The database has to be removed.
-        emit wipeDb();
         break;
     case CSYNC_ERR_REMOTE_CREATE:
     case CSYNC_ERR_REMOTE_STAT:
@@ -250,8 +250,8 @@ int CSyncThread::treewalkError(TREE_WALK_FILE* file)
         return 0;
 
     if( file &&
-        file->instruction == CSYNC_INSTRUCTION_STAT_ERROR ||
-        file->instruction == CSYNC_INSTRUCTION_ERROR ) {
+        (file->instruction == CSYNC_INSTRUCTION_STAT_ERROR ||
+        file->instruction == CSYNC_INSTRUCTION_ERROR) ) {
         _mutex.lock();
         _syncedItems[indx]._instruction = file->instruction;
         _mutex.unlock();

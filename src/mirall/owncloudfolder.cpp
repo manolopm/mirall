@@ -69,19 +69,23 @@ ownCloudFolder::ownCloudFolder(const QString &alias,
     , _csync(0)
     , _csyncError(false)
     , _csyncUnavail(false)
-    , _wipeDb(false)
+    , _csync_ctx(0)
 {
     ServerActionNotifier *notifier = new ServerActionNotifier(this);
     connect(notifier, SIGNAL(guiLog(QString,QString)), Logger::instance(), SIGNAL(guiLog(QString,QString)));
     connect(this, SIGNAL(syncFinished(SyncResult)), notifier, SLOT(slotSyncFinished(SyncResult)));
     qDebug() << "****** ownCloud folder using watcher *******";
     // The folder interval is set in the folder parent class.
+}
 
-    QString url = replaceScheme(secondPath);
+bool ownCloudFolder::init()
+{
+    QString url = replaceScheme(ownCloudInfo::instance()->webdavUrl() + secondPath());
     QString localpath = path();
 
     if( csync_create( &_csync_ctx, localpath.toUtf8().data(), url.toUtf8().data() ) < 0 ) {
         qDebug() << "Unable to create csync-context!";
+        slotCSyncError(tr("Unable to create csync-context"));
         _csync_ctx = 0;
     } else {
         csync_set_log_callback(   _csync_ctx, csyncLogCatcher );
@@ -99,12 +103,14 @@ ownCloudFolder::ownCloudFolder(const QString &alias,
         csync_set_auth_callback( _csync_ctx, getauth );
 
         if( csync_init( _csync_ctx ) < 0 ) {
-            qDebug() << "Could not initialize csync!";
+            qDebug() << "Could not initialize csync!" << csync_get_error(_csync_ctx) << csync_get_error_string(_csync_ctx);
+            slotCSyncError(CSyncThread::csyncErrorToString(csync_get_error(_csync_ctx), csync_get_error_string(_csync_ctx)));
+            csync_destroy(_csync_ctx);
             _csync_ctx = 0;
         }
         setProxy();
-
     }
+    return _csync_ctx;
 }
 
 ownCloudFolder::~ownCloudFolder()
@@ -123,17 +129,16 @@ void ownCloudFolder::setProxy()
 {
     if( _csync_ctx ) {
         /* Store proxy */
-        MirallConfigFile cfgFile;
-        QUrl proxyUrl(cfgFile.ownCloudUrl());
+        QUrl proxyUrl(ownCloudInfo::instance()->webdavUrl());
         QList<QNetworkProxy> proxies = QNetworkProxyFactory::proxyForQuery(proxyUrl);
         // We set at least one in Application
         Q_ASSERT(proxies.count() > 0);
         QNetworkProxy proxy = proxies.first();
         if (proxy.type() == QNetworkProxy::NoProxy) {
-            qDebug() << "Passing NO proxy to csync for" << cfgFile.ownCloudUrl();
+            qDebug() << "Passing NO proxy to csync for" << proxyUrl;
         } else {
             qDebug() << "Passing" << proxy.hostName() << "of proxy type " << proxy.type()
-                     << " to csync for" << cfgFile.ownCloudUrl();
+                     << " to csync for" << proxyUrl;
         }
         int proxyPort = proxy.port();
 
@@ -239,18 +244,7 @@ bool ownCloudFolder::isBusy() const
 
 QString ownCloudFolder::secondPath() const
 {
-    QString re(Folder::secondPath());
-    MirallConfigFile cfg;
-    QString ocUrl = cfg.ownCloudUrl(QString::null, true);
-    if (ocUrl.endsWith(QLatin1Char('/')))
-        ocUrl.chop(1);
-
-    // qDebug() << "**** " << ocUrl << " <-> " << re;
-    if( re.startsWith( ocUrl ) ) {
-        re.remove( ocUrl );
-    }
-
-    return re;
+    return Folder::secondPath();
 }
 
 void ownCloudFolder::startSync()
@@ -260,6 +254,18 @@ void ownCloudFolder::startSync()
 
 void ownCloudFolder::startSync(const QStringList &pathList)
 {
+    if (!_csync_ctx) {
+        // no _csync_ctx yet,  initialize it.
+        init();
+
+        if (!_csync_ctx) {
+            qDebug() << Q_FUNC_INFO << "init failed.";
+            // the error should already be set
+            QMetaObject::invokeMethod(this, "slotCSyncFinished", Qt::QueuedConnection);
+            return;
+        }
+    }
+
     if (_thread && _thread->isRunning()) {
         qCritical() << "* ERROR csync is still running and new sync requested.";
         return;
@@ -271,7 +277,6 @@ void ownCloudFolder::startSync(const QStringList &pathList)
     _errors.clear();
     _csyncError = false;
     _csyncUnavail = false;
-    _wipeDb = false;
 
     MirallConfigFile cfgFile;
 
@@ -333,7 +338,6 @@ void ownCloudFolder::slotCSyncFinished()
         qDebug() << "  ** error Strings: " << _errors;
         _syncResult.setErrorStrings( _errors );
         qDebug() << "    * owncloud csync thread finished with error";
-        if( _wipeDb ) wipe();
     } else if (_csyncUnavail) {
         _syncResult.setStatus(SyncResult::Unavailable);
     } else {
@@ -427,7 +431,6 @@ void ownCloudFolder::wipe()
     if( ctmpFile.exists() ) {
         ctmpFile.remove();
     }
-    _wipeDb = false;
 }
 
 ServerActionNotifier::ServerActionNotifier(QObject *parent)
